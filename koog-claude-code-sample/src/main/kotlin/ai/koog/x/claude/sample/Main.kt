@@ -16,26 +16,21 @@ import com.github.ajalt.clikt.command.SuspendingCliktCommand
 import com.github.ajalt.clikt.command.main
 import com.github.ajalt.clikt.parameters.options.default
 import com.github.ajalt.clikt.parameters.options.option
+import com.iodesystems.tshell.TShell
+import com.iodesystems.tshell.toolkit.CoreToolkit
+import com.iodesystems.tshell.toolkit.FileToolkit
+import com.iodesystems.tshell.toolkit.MathToolkit
 import kotlinx.coroutines.runBlocking
+import java.io.File
 
-@LLMDescription("Execute a bash command and return its output")
-class BashTools : ToolSet {
+class TShellTools(private val shell: TShell) : ToolSet {
     @Tool
-    @LLMDescription("Run a bash command. Returns stdout. Use for file listing, searching, calculations, etc.")
-    fun bash(
-        @LLMDescription("The bash command to execute") command: String
+    @LLMDescription(TShell.TOOL_DESCRIPTION)
+    fun tshell(
+        @LLMDescription("tshell source code") code: String
     ): String {
         return try {
-            val process = ProcessBuilder("bash", "-c", command)
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
-            if (exitCode != 0) {
-                "Exit code: $exitCode\n$output"
-            } else {
-                output
-            }
+            shell.evalExported(code).toDisplayString()
         } catch (e: Exception) {
             "ERROR: ${e.message}"
         }
@@ -58,14 +53,22 @@ class ClaudeCodeChat : SuspendingCliktCommand(name = "claude-code-chat") {
 
         echo("Using model: ${llmModel.id}")
 
-        val bashTools = BashTools()
+        val workingDir = dir?.let { File(it) } ?: File(System.getProperty("user.dir"))
+        val shell = TShell()
+        CoreToolkit.install(shell)
+        MathToolkit().install(shell)
+        FileToolkit(workingDir.toPath(), readOnly = true).install(shell)
+
+        val tshellTools = TShellTools(shell)
         val toolRegistry = ToolRegistry {
-            tools(bashTools)
+            tools(tshellTools)
         }
 
         val systemPrompt = buildString {
-            appendLine("You are a helpful assistant with access to bash via the bash tool.")
-            appendLine("Use the bash tool to execute commands when the user asks you to compute, transform, or query data.")
+            appendLine("You are a helpful assistant with access to tshell.")
+            appendLine("Use the tshell tool to execute code when the user asks you to compute, transform, or query data.")
+            appendLine()
+            appendLine(shell.toPrompt())
             if (dir != null) {
                 appendLine("Working directory context: $dir")
             }

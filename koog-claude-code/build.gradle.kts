@@ -20,11 +20,11 @@ dependencies {
     implementation(libs.kotlin.logging)
     implementation(libs.logback)
 
-    testImplementation(kotlin("test"))
+    testImplementation(libs.testng)
 }
 
 tasks.test {
-    useJUnitPlatform()
+    useTestNG()
 }
 
 java {

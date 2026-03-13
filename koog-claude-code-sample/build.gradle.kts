@@ -11,6 +11,7 @@ dependencies {
     implementation(project(":koog-claude-code"))
     implementation(libs.koog.agents)
     implementation(libs.clikt)
+    implementation(libs.tshell)
     implementation(libs.kotlin.logging)
     implementation(libs.logback)
 }

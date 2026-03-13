@@ -13,6 +13,7 @@ private val logger = KotlinLogging.logger {}
 class ClaudeProcess(
     private val mcpConfigFile: File,
     private val claudeBinary: String = "claude",
+    private val allowedTools: String = "mcp__koog__*",
 ) {
     private var process: Process? = null
     private var stdin: BufferedWriter? = null
@@ -29,7 +30,7 @@ class ClaudeProcess(
             "--verbose",
             "--dangerously-skip-permissions",
             "--tools", "",
-            "--allowed-tools", "mcp__koog__*",
+            "--allowed-tools", allowedTools,
             "--mcp-config", mcpConfigFile.absolutePath,
         )
 

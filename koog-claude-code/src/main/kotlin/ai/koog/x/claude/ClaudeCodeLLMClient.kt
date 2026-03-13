@@ -12,6 +12,7 @@ import ai.koog.prompt.streaming.StreamFrame
 import ai.koog.x.claude.model.ClaudeStreamEvent
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.selects.select
 import kotlinx.serialization.json.*
@@ -20,6 +21,8 @@ private val logger = KotlinLogging.logger {}
 
 class ClaudeCodeLLMClient(
     private val claudeBinary: String = "claude",
+    private val externalMcpConfigFile: java.io.File? = null,
+    private val allowedTools: String = "mcp__koog__*",
 ) : LLMClient {
     private val toolBridge = McpToolBridge()
     private val mcpServer = McpBridgeServer(toolBridge)
@@ -28,7 +31,10 @@ class ClaudeCodeLLMClient(
     private var stdoutReaderJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private val completedResponses = kotlinx.coroutines.channels.Channel<CompletedTurn>(kotlinx.coroutines.channels.Channel.BUFFERED)
+    private val completedResponses = Channel<CompletedTurn>(Channel.BUFFERED)
+
+    // Streaming: emits frames as they arrive from claude's partial output
+    private val streamingFrames = Channel<StreamFrame>(Channel.BUFFERED)
 
     private sealed class CompletedTurn {
         data class Text(val text: String, val inputTokens: Int?, val outputTokens: Int?) : CompletedTurn()
@@ -38,14 +44,21 @@ class ClaudeCodeLLMClient(
         data object ProcessDied : CompletedTurn()
     }
 
+    // Track content block types by index for streaming
+    private val activeBlockTypes = mutableMapOf<Int, String>()
+    private val activeBlockIds = mutableMapOf<Int, String>()
+    private val activeBlockNames = mutableMapOf<Int, String>()
+
     suspend fun initialize() {
-        mcpServer.start()
+        if (externalMcpConfigFile == null) {
+            mcpServer.start()
+        }
         startClaudeProcess()
     }
 
     private fun startClaudeProcess() {
-        val configFile = mcpServer.generateConfigFile()
-        claudeProcess = ClaudeProcess(configFile, claudeBinary).also { it.start() }
+        val configFile = externalMcpConfigFile ?: mcpServer.generateConfigFile()
+        claudeProcess = ClaudeProcess(configFile, claudeBinary, allowedTools).also { it.start() }
         startStdoutReader()
     }
 
@@ -98,14 +111,51 @@ class ClaudeCodeLLMClient(
                 completedResponses.send(CompletedTurn.Error(event.message))
             }
 
-            // Streaming events (when --include-partial-messages is used)
-            is ClaudeStreamEvent.MessageStart,
-            is ClaudeStreamEvent.ContentBlockStart,
-            is ClaudeStreamEvent.ContentBlockDelta,
-            is ClaudeStreamEvent.ContentBlockStop,
-            is ClaudeStreamEvent.MessageDelta,
+            is ClaudeStreamEvent.ContentBlockStart -> {
+                activeBlockTypes[event.index] = event.type
+                event.id?.let { activeBlockIds[event.index] = it }
+                event.name?.let { activeBlockNames[event.index] = it }
+            }
+
+            is ClaudeStreamEvent.ContentBlockDelta -> {
+                val blockType = activeBlockTypes[event.index]
+                when {
+                    event.text != null && (blockType == "text" || event.deltaType == "text_delta") -> {
+                        streamingFrames.send(StreamFrame.TextDelta(event.text, event.index))
+                    }
+                    event.inputJson != null && (blockType == "tool_use" || event.deltaType == "input_json_delta") -> {
+                        val id = activeBlockIds[event.index]
+                        val name = activeBlockNames[event.index]
+                        streamingFrames.send(StreamFrame.ToolCallDelta(id, name, event.inputJson, event.index))
+                    }
+                    event.thinking != null -> {
+                        streamingFrames.send(StreamFrame.ReasoningDelta(event.thinking, index = event.index))
+                    }
+                }
+            }
+
+            is ClaudeStreamEvent.ContentBlockStop -> {
+                val blockType = activeBlockTypes.remove(event.index)
+                val id = activeBlockIds.remove(event.index)
+                val name = activeBlockNames.remove(event.index)
+                // TextComplete and ToolCallComplete are emitted when the full response
+                // arrives via AssistantMessage — we don't need to emit them here
+                logger.debug { "Content block $event.index ($blockType) stopped" }
+            }
+
+            is ClaudeStreamEvent.MessageStart -> {
+                activeBlockTypes.clear()
+                activeBlockIds.clear()
+                activeBlockNames.clear()
+            }
+
+            is ClaudeStreamEvent.MessageDelta -> {
+                val meta = createResponseMetaInfo(null, event.outputTokens)
+                streamingFrames.send(StreamFrame.End(event.stopReason, meta))
+            }
+
             is ClaudeStreamEvent.MessageStop -> {
-                // Not used in non-streaming mode
+                // No action needed
             }
 
             is ClaudeStreamEvent.Unknown -> {
@@ -120,7 +170,9 @@ class ClaudeCodeLLMClient(
         tools: List<ToolDescriptor>,
     ): List<Message.Response> {
         ensureProcessAlive()
-        mcpServer.updateTools(tools)
+        if (externalMcpConfigFile == null) {
+            mcpServer.updateTools(tools)
+        }
 
         val newMessages = conversationTracker.getNewMessages(prompt)
         if (newMessages.isEmpty()) {
@@ -129,6 +181,8 @@ class ClaudeCodeLLMClient(
 
         val userContent = buildUserContent(newMessages)
         if (userContent != null) {
+            // Drain any stale streaming frames before sending
+            while (streamingFrames.tryReceive().isSuccess) { /* discard */ }
             claudeProcess!!.sendMessage(userContent)
         } else {
             // Last message is a tool result — send it via the bridge
@@ -148,10 +202,15 @@ class ClaudeCodeLLMClient(
 
     private suspend fun waitForResponse(): List<Message.Response> {
         while (true) {
-            val turn = select<CompletedTurn> {
-                completedResponses.onReceive { it }
-                toolBridge.pendingCall.onReceive { call ->
-                    CompletedTurn.ToolUse(listOf(call))
+            val turn = if (externalMcpConfigFile != null) {
+                // External MCP: tool calls handled externally, just wait for text responses
+                completedResponses.receive()
+            } else {
+                select<CompletedTurn> {
+                    completedResponses.onReceive { it }
+                    toolBridge.pendingCall.onReceive { call ->
+                        CompletedTurn.ToolUse(listOf(call))
+                    }
                 }
             }
 
@@ -223,15 +282,38 @@ class ClaudeCodeLLMClient(
         model: LLModel,
         tools: List<ToolDescriptor>,
     ): Flow<StreamFrame> = flow {
-        val responses = execute(prompt, model, tools)
+        // Launch execute in background — it sends the message and waits for completion.
+        // Meanwhile, we collect streaming frames as they arrive from the stdout reader.
+        val executeJob = scope.async { execute(prompt, model, tools) }
+
+        // Collect streaming frames until execute completes
+        try {
+            while (executeJob.isActive) {
+                val frame = withTimeoutOrNull(50) {
+                    streamingFrames.receive()
+                }
+                if (frame != null) {
+                    emit(frame)
+                }
+            }
+            // Drain remaining frames
+            while (true) {
+                val frame = streamingFrames.tryReceive().getOrNull() ?: break
+                emit(frame)
+            }
+        } catch (e: CancellationException) {
+            executeJob.cancel()
+            throw e
+        }
+
+        // Get the final responses and emit complete frames
+        val responses = executeJob.await()
         for (response in responses) {
             when (response) {
                 is Message.Assistant -> {
-                    emit(StreamFrame.TextDelta(response.content))
                     emit(StreamFrame.TextComplete(response.content))
                 }
                 is Message.Tool.Call -> {
-                    emit(StreamFrame.ToolCallDelta(response.id, response.tool, response.content))
                     emit(StreamFrame.ToolCallComplete(response.id, response.tool, response.content))
                 }
                 else -> {}
@@ -260,8 +342,10 @@ class ClaudeCodeLLMClient(
     override fun close() {
         stdoutReaderJob?.cancel()
         claudeProcess?.stop()
-        mcpServer.stop()
-        toolBridge.close()
+        if (externalMcpConfigFile == null) {
+            mcpServer.stop()
+            toolBridge.close()
+        }
         scope.cancel()
     }
 
