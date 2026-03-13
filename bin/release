@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"/..
+
+./gradlew releaseStripSnapshotCommitAndTag && \
+  (
+    ./gradlew :koog-claude-code:publishToMavenLocal && \
+    ./gradlew :koog-claude-code:clean :koog-claude-code:build publishToSonatype closeAndReleaseSonatypeStagingRepository && \
+    ./gradlew releasePrepareNextDevelopmentIteration \
+  ) || \
+  ./gradlew releaseRevert
