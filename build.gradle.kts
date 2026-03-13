@@ -9,7 +9,7 @@ plugins {
 
 allprojects {
     group = "com.iodesystems.koog-claude-code"
-    version = "0.1.0-SNAPSHOT"
+    version = "0.1.0"
     description = "Koog LLMClient backed by claude -p CLI"
 
     repositories {
