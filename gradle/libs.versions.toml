@@ -7,8 +7,12 @@ kotlinx-serialization = "1.8.0"
 clikt = "5.1.0"
 kotlin-logging = "7.0.3"
 logback = "1.5.16"
+gradle-nexus-publish-plugin = "2.0.0"
 
 [libraries]
+gradle-kotlin-plugin = { module = "org.jetbrains.kotlin:kotlin-gradle-plugin", version.ref = "kotlin" }
+kotlin-serialization-plugin = { module = "org.jetbrains.kotlin:kotlin-serialization", version.ref = "kotlin" }
+gradle-nexus-publish-plugin = "io.github.gradle-nexus.publish-plugin:io.github.gradle-nexus.publish-plugin.gradle.plugin:2.0.0"
 koog-agents = { module = "ai.koog:koog-agents", version.ref = "koog" }
 koog-prompt-executor-clients = { module = "ai.koog:prompt-executor-clients-jvm", version.ref = "koog" }
 koog-agents-tools = { module = "ai.koog:agents-tools-jvm", version.ref = "koog" }
