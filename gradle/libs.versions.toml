@@ -29,4 +29,4 @@ kotlin-logging = { module = "io.github.oshai:kotlin-logging-jvm", version.ref = 
 logback = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 clikt = { module = "com.github.ajalt.clikt:clikt", version.ref = "clikt" }
 testng = { module = "org.testng:testng", version.ref = "testng" }
-tshell = "com.iodesystems.tshell:tshell:0.1.0"
+tshell = "com.iodesystems.tshell:tshell:0.1.1"
