@@ -1,12 +1,14 @@
 package ai.koog.x.claude
 
 import ai.koog.agents.core.tools.ToolDescriptor
+import ai.koog.prompt.Prompt
 import ai.koog.prompt.dsl.ModerationResult
-import ai.koog.prompt.dsl.Prompt
-import ai.koog.prompt.llm.LLModel
-import ai.koog.prompt.llm.LLMProvider
 import ai.koog.prompt.executor.clients.LLMClient
+import ai.koog.prompt.llm.LLMProvider
+import ai.koog.prompt.llm.LLModel
+import ai.koog.prompt.message.LLMChoice
 import ai.koog.prompt.message.Message
+import ai.koog.prompt.message.MessagePart
 import ai.koog.prompt.message.ResponseMetaInfo
 import ai.koog.prompt.streaming.StreamFrame
 import ai.koog.x.claude.model.ClaudeStreamEvent
@@ -16,6 +18,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.selects.select
 import kotlinx.serialization.json.*
+import kotlin.time.Duration.Companion.milliseconds
 
 private val logger = KotlinLogging.logger {}
 
@@ -23,7 +26,7 @@ class ClaudeCodeLLMClient(
     private val claudeBinary: String = "claude",
     private val externalMcpConfigFile: java.io.File? = null,
     private val allowedTools: String = "mcp__koog__*",
-) : LLMClient {
+) : LLMClient() {
     private val toolBridge = McpToolBridge()
     private val mcpServer = McpBridgeServer(toolBridge)
     private val conversationTracker = ConversationTracker()
@@ -168,7 +171,7 @@ class ClaudeCodeLLMClient(
         prompt: Prompt,
         model: LLModel,
         tools: List<ToolDescriptor>,
-    ): List<Message.Response> {
+    ): Message.Assistant {
         ensureProcessAlive()
         if (externalMcpConfigFile == null) {
             mcpServer.updateTools(tools)
@@ -176,7 +179,8 @@ class ClaudeCodeLLMClient(
 
         val newMessages = conversationTracker.getNewMessages(prompt)
         if (newMessages.isEmpty()) {
-            return emptyList()
+            val metaInfo = createResponseMetaInfo(null, null)
+            return Message.Assistant(emptyList(), metaInfo)
         }
 
         val userContent = buildUserContent(newMessages)
@@ -186,21 +190,24 @@ class ClaudeCodeLLMClient(
             claudeProcess!!.sendMessage(userContent)
         } else {
             // Last message is a tool result — send it via the bridge
-            val toolResults = newMessages.filterIsInstance<Message.Tool.Result>()
-            for (result in toolResults) {
-                toolBridge.pendingResult.send(
-                    ToolCallResult(
-                        id = result.id ?: "",
-                        result = result.content ?: "",
+            val userMessages = newMessages.filterIsInstance<Message.User>()
+            for (userMessage in userMessages) {
+                val toolResults = userMessage.parts.filterIsInstance<MessagePart.Tool.Result>()
+                for (result in toolResults) {
+                    toolBridge.pendingResult.send(
+                        ToolCallResult(
+                            id = result.id ?: "",
+                            result = result.output,
+                        )
                     )
-                )
+                }
             }
         }
 
         return waitForResponse()
     }
 
-    private suspend fun waitForResponse(): List<Message.Response> {
+    private suspend fun waitForResponse(): Message.Assistant {
         while (true) {
             val turn = if (externalMcpConfigFile != null) {
                 // External MCP: tool calls handled externally, just wait for text responses
@@ -217,26 +224,31 @@ class ClaudeCodeLLMClient(
             when (turn) {
                 is CompletedTurn.Text -> {
                     val metaInfo = createResponseMetaInfo(turn.inputTokens, turn.outputTokens)
-                    return listOf(Message.Assistant(turn.text, metaInfo, "end_turn"))
+                    return Message.Assistant(turn.text, metaInfo, "end_turn")
                 }
 
                 is CompletedTurn.ToolUse -> {
                     val metaInfo = createResponseMetaInfo(null, null)
-                    return turn.calls.map { call ->
-                        Message.Tool.Call(call.id, call.name, call.argsJson, metaInfo)
-                    }
+                    return Message.Assistant(
+                        turn.calls.map { call ->
+                            val part = MessagePart.Tool.Call(call.id, call.name, call.argsJson)
+                            part
+                        },
+                        metaInfo,
+                        "tool_call"
+                    )
                 }
 
                 is CompletedTurn.ResultEvent -> {
                     if (turn.isError) {
                         val metaInfo = createResponseMetaInfo(null, null)
-                        return listOf(Message.Assistant("Error: ${turn.text}", metaInfo, "error"))
+                        return Message.Assistant("Error: ${turn.text}", metaInfo, "error")
                     }
                     // Non-error result with text — this is the final answer if we haven't
                     // already returned a Text turn
                     if (turn.text != null) {
                         val metaInfo = createResponseMetaInfo(null, null)
-                        return listOf(Message.Assistant(turn.text, metaInfo, "end_turn"))
+                        return Message.Assistant(turn.text, metaInfo, "end_turn")
                     }
                     // Empty result, keep waiting (shouldn't happen)
                     continue
@@ -244,7 +256,7 @@ class ClaudeCodeLLMClient(
 
                 is CompletedTurn.Error -> {
                     val metaInfo = createResponseMetaInfo(null, null)
-                    return listOf(Message.Assistant("Error: ${turn.message}", metaInfo, "error"))
+                    return Message.Assistant("Error: ${turn.message}", metaInfo, "error")
                 }
 
                 is CompletedTurn.ProcessDied -> {
@@ -252,26 +264,35 @@ class ClaudeCodeLLMClient(
                     conversationTracker.reset()
                     startClaudeProcess()
                     val metaInfo = createResponseMetaInfo(null, null)
-                    return listOf(
-                        Message.Assistant("Claude process died unexpectedly. Restarted.", metaInfo, "error")
-                    )
+                    return Message.Assistant("Claude process died unexpectedly. Restarted.", metaInfo, "error")
                 }
             }
         }
     }
 
     private fun buildUserContent(messages: List<Message>): String? {
-        if (messages.last() is Message.Tool.Result) return null
+        val lastMsg = messages.last()
+        if (lastMsg is Message.User && lastMsg.parts.filterIsInstance<MessagePart.Tool.Result>().isNotEmpty()) return null
 
         val parts = mutableListOf<String>()
         for (msg in messages) {
             when (msg) {
-                is Message.System -> parts.add("[System] ${msg.content}")
-                is Message.User -> parts.add(msg.content)
-                is Message.Assistant -> parts.add("[Previous Assistant] ${msg.content}")
-                is Message.Tool.Call -> parts.add("[Previous Tool Call] ${msg.tool}: ${msg.content}")
-                is Message.Tool.Result -> parts.add("[Tool Result for ${msg.id}] ${msg.content}")
-                else -> parts.add(msg.content)
+                is Message.System -> msg.parts.forEach { parts.add("[System] ${it.text}") }
+                is Message.User -> msg.parts.forEach { part ->
+                    when (part) {
+                        is MessagePart.Text -> parts.add(part.text)
+                        is MessagePart.Tool.Result -> parts.add("[Tool Result for ${part.id}] ${part.output}")
+                        is MessagePart.Attachment -> parts.add("[Attachment ${part.source.fileName} (${part.source.mimeType})] ${part.source.content}")
+                    }
+                }
+                is Message.Assistant -> msg.parts.forEach { part ->
+                    when (part) {
+                        is MessagePart.Text -> parts.add("[Previous Assistant] ${part.text}")
+                        is MessagePart.Tool.Call -> parts.add("[Previous Tool Call for ${part.id}] ${part.tool}: ${part.args}")
+                        is MessagePart.Attachment -> parts.add("[Previous Assistant Attachment ${part.source.fileName} (${part.source.mimeType})] ${part.source.content}")
+                        is MessagePart.Reasoning -> part.content.forEach { parts.add("[Previous Assistant Reasoning] $it") }
+                    }
+                }
             }
         }
         return parts.joinToString("\n\n")
@@ -289,7 +310,7 @@ class ClaudeCodeLLMClient(
         // Collect streaming frames until execute completes
         try {
             while (executeJob.isActive) {
-                val frame = withTimeoutOrNull(50) {
+                val frame = withTimeoutOrNull(50.milliseconds) {
                     streamingFrames.receive()
                 }
                 if (frame != null) {
@@ -307,27 +328,26 @@ class ClaudeCodeLLMClient(
         }
 
         // Get the final responses and emit complete frames
-        val responses = executeJob.await()
-        for (response in responses) {
-            when (response) {
-                is Message.Assistant -> {
-                    emit(StreamFrame.TextComplete(response.content))
+        val response = executeJob.await()
+        for (part in response.parts) {
+            when (part) {
+                is MessagePart.Text -> {
+                    emit(StreamFrame.TextComplete(part.text))
                 }
-                is Message.Tool.Call -> {
-                    emit(StreamFrame.ToolCallComplete(response.id, response.tool, response.content))
+                is MessagePart.Tool.Call -> {
+                    emit(StreamFrame.ToolCallComplete(part.id, part.tool, part.args))
                 }
                 else -> {}
             }
         }
-        val lastMeta = responses.lastOrNull()?.metaInfo ?: createResponseMetaInfo(null, null)
-        emit(StreamFrame.End("end_turn", lastMeta))
+        emit(StreamFrame.End("end_turn", response.metaInfo))
     }
 
     override suspend fun executeMultipleChoices(
         prompt: Prompt,
         model: LLModel,
         tools: List<ToolDescriptor>,
-    ): List<List<Message.Response>> {
+    ): LLMChoice {
         return listOf(execute(prompt, model, tools))
     }
 
@@ -363,7 +383,6 @@ class ClaudeCodeLLMClient(
             totalTokensCount = if (inputTokens != null && outputTokens != null) inputTokens + outputTokens else null,
             inputTokensCount = inputTokens,
             outputTokensCount = outputTokens,
-            additionalInfo = emptyMap(),
             metadata = JsonObject(emptyMap()),
         )
     }
