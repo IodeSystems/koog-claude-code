@@ -23,7 +23,7 @@ class ClaudeCodeLLMClient(
     private val claudeBinary: String = "claude",
     private val externalMcpConfigFile: java.io.File? = null,
     private val allowedTools: String = "mcp__koog__*",
-) : LLMClient {
+) : LLMClient() {
     private val toolBridge = McpToolBridge()
     private val mcpServer = McpBridgeServer(toolBridge)
     private val conversationTracker = ConversationTracker()
