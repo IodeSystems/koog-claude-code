@@ -1,6 +1,6 @@
 package ai.koog.x.claude
 
-import ai.koog.prompt.dsl.Prompt
+import ai.koog.prompt.Prompt
 import ai.koog.prompt.message.Message
 
 class ConversationTracker {
