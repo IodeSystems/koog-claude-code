@@ -8,7 +8,7 @@ import ai.koog.agents.core.tools.annotations.LLMDescription
 import ai.koog.agents.core.tools.annotations.Tool
 import ai.koog.agents.core.tools.reflect.ToolSet
 import ai.koog.prompt.dsl.prompt
-import ai.koog.prompt.executor.llms.SingleLLMPromptExecutor
+import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor
 import ai.koog.x.claude.ClaudeCodeLLMClient
 import ai.koog.x.claude.ClaudeCodeModels
 import com.github.ajalt.clikt.command.SuspendingCliktCommand
@@ -47,7 +47,7 @@ class ClaudeCodeChat : SuspendingCliktCommand(name = "claude-code-chat") {
         val client = ClaudeCodeLLMClient()
         client.initialize()
 
-        val executor = SingleLLMPromptExecutor(client)
+        val executor = MultiLLMPromptExecutor(client)
         val llmModel = ClaudeCodeModels.all.find { it.id == model } ?: ClaudeCodeModels.Claude4_5Sonnet
 
         echo("Using model: ${llmModel.id}")

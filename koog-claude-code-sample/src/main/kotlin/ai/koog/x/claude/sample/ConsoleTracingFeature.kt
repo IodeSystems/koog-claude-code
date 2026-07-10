@@ -5,11 +5,15 @@ import ai.koog.agents.core.agent.entity.AIAgentStorageKey
 import ai.koog.agents.core.feature.AIAgentGraphFeature
 import ai.koog.agents.core.feature.config.FeatureConfig
 import ai.koog.agents.core.feature.pipeline.AIAgentGraphPipeline
+import ai.koog.serialization.KotlinClassToken
 
 class ConsoleTracingConfig : FeatureConfig()
 
 object ConsoleTracingFeature : AIAgentGraphFeature<ConsoleTracingConfig, ConsoleTracingFeature> {
-    override val key = AIAgentStorageKey<ConsoleTracingFeature>("ConsoleTracing")
+    override val key = AIAgentStorageKey<ConsoleTracingFeature>(
+        "ConsoleTracing",
+        KotlinClassToken(ConsoleTracingFeature::class)
+    )
 
     override fun createInitialConfig(agentConfig: AIAgentConfig) = ConsoleTracingConfig()
 
@@ -22,8 +26,8 @@ object ConsoleTracingFeature : AIAgentGraphFeature<ConsoleTracingConfig, Console
         }
 
         pipeline.interceptLLMCallCompleted(this) { ctx ->
-            for (response in ctx.responses) {
-                println("  ⟵ LLM: $response")
+            ctx.response?.parts?.forEach { responsePart ->
+                println("  ⟵ LLM: $responsePart")
             }
         }
 
